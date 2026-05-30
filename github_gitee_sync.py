@@ -319,6 +319,26 @@ def env_token(names: Sequence[str]) -> tuple[str | None, str]:
     return None, names[0]
 
 
+def ensure_https_support() -> None:
+    """检查当前 Python 是否能使用 HTTPS；conda 环境未激活时常在这里失败。"""
+    try:
+        import ssl  # noqa: F401
+    except ImportError as exc:
+        raise SyncError(
+            "Current Python cannot import ssl, so HTTPS API requests are unavailable. "
+            "Do not run the conda env python.exe directly. Use:\n"
+            r"  F:\anaconda\Scripts\conda.exe run -n tf22 python github_gitee_sync.py"
+            "\nOr activate tf22 in the shell first, then run the script."
+        ) from exc
+
+    if not hasattr(urllib.request, "HTTPSHandler"):
+        raise SyncError(
+            "Current Python urllib has no HTTPSHandler. Run the script through "
+            "an activated conda environment, for example:\n"
+            r"  F:\anaconda\Scripts\conda.exe run -n tf22 python github_gitee_sync.py"
+        )
+
+
 def prompt_text(label: str, default: str | None = None) -> str:
     default_hint = f" [{default}]" if default else ""
     while True:
@@ -356,6 +376,7 @@ def github_api_request(
     token: str | None = None,
     payload: dict[str, Any] | None = None,
 ) -> ApiResponse:
+    ensure_https_support()
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "github-gitee-sync/1.0",
@@ -619,6 +640,7 @@ def gitee_api_request(
     token: str | None = None,
     form: dict[str, str] | None = None,
 ) -> ApiResponse:
+    ensure_https_support()
     query: dict[str, str] = {}
     body = None
     headers = {
