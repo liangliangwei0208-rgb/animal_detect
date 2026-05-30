@@ -263,6 +263,54 @@ def remote_matches_target(existing_url: str, target: GiteeTarget) -> bool:
     return slug == RepoSlug(owner=target.owner, name=target.name)
 
 
+def strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def detect_gitee_ssh_owner() -> str | None:
+    """通过 SSH 登录提示识别当前 Gitee 账号，例如 liangliang2000。"""
+    result = subprocess.run(
+        [
+            "ssh",
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=15",
+            "git@gitee.com",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    output = strip_ansi(f"{result.stdout}\n{result.stderr}")
+    match = re.search(r"Hi\s+([^\s(!]+)(?:\(@[^)]*\))?!", output)
+    if not match:
+        return None
+
+    owner = match.group(1).strip()
+    try:
+        return validate_slug_part(owner, "Gitee SSH owner")
+    except SyncError:
+        return None
+
+
+def choose_gitee_owner(explicit_owner: str | None, fallback_owner: str) -> str:
+    """优先使用命令行参数，其次使用 SSH 账号，最后回退 GitHub owner。"""
+    if explicit_owner:
+        return explicit_owner
+
+    detected_owner = detect_gitee_ssh_owner()
+    if detected_owner:
+        log(f"Detected Gitee SSH owner: {detected_owner}")
+        return detected_owner
+
+    log(f"[WARN] Could not detect Gitee SSH owner; fallback to {fallback_owner}")
+    return fallback_owner
+
+
 def env_token(names: Sequence[str]) -> tuple[str | None, str]:
     for name in names:
         token = os.environ.get(name)
@@ -740,7 +788,10 @@ def sync_repositories(
         fix_remote=fix_remote,
         dry_run=dry_run,
     )
-    target = build_gitee_target(gitee_owner or github_slug.owner, github_slug.name)
+    target = build_gitee_target(
+        choose_gitee_owner(gitee_owner, github_slug.owner),
+        github_slug.name,
+    )
     log(f"GitHub repository: {github_slug.owner}/{github_slug.name}")
     log(f"Gitee target: {target.owner}/{target.name}")
 
@@ -901,7 +952,10 @@ def print_init_gitee(
             )
         if slug:
             github_target = build_github_target(slug.owner, slug.name)
-            target = build_gitee_target(gitee_owner or slug.owner, slug.name)
+            target = build_gitee_target(
+                choose_gitee_owner(gitee_owner, slug.owner),
+                slug.name,
+            )
             print("\nDerived repository mapping:")
             print(f"  GitHub: {github_target.owner}/{github_target.name}")
             print(f"  GitHub remote: {github_target.ssh_url}")
@@ -953,7 +1007,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--gitee-owner",
         default=None,
-        help="Gitee user or namespace. Defaults to the GitHub owner.",
+        help=(
+            "Gitee user or namespace. Defaults to the detected Gitee SSH "
+            "login, then falls back to the GitHub owner."
+        ),
     )
     parser.add_argument(
         "--private",
