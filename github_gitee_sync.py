@@ -1,10 +1,9 @@
 """
-Generic GitHub/Gitee repository synchronizer.
+GitHub/Gitee 三方同步脚本。
 
-Copy this file into a local Git repository and run it from the repository root.
-It reads the GitHub remote, derives the same-name Gitee repository, creates the
-GitHub/Gitee repositories when needed, and then synchronizes local/GitHub/Gitee
-without rewriting history.
+使用方式：把这个文件放在本地 Git 仓库根目录运行。脚本会读取 GitHub
+远程仓库，推导对应的 Gitee 仓库，必要时创建远程仓库，然后把本地、
+GitHub、Gitee 三端同步到同一个分支提交。
 """
 from __future__ import annotations
 
@@ -115,6 +114,7 @@ def run_git(
     check: bool = True,
     dry_run: bool = False,
 ) -> GitResult:
+    # 所有 git 命令都从这里走，方便 dry-run 时只打印命令、不真正修改远程。
     full_args = ["git", *args]
     log(format_command(full_args))
     if dry_run:
@@ -176,6 +176,7 @@ def ensure_current_branch(repo: Path, branch: str) -> None:
 
 
 def ensure_clean_worktree(repo: Path) -> None:
+    # 同步前强制要求工作区干净：脚本只负责同步提交，不负责帮你自动提交代码。
     status = git_output(repo, ["status", "--porcelain"])
     if status:
         raise SyncError(
@@ -222,6 +223,7 @@ def strip_dot_git(repo_name: str) -> str:
 
 
 def parse_remote_slug(remote_url: str, expected_host: str) -> RepoSlug | None:
+    # 同时支持 SSH 地址 git@host:owner/repo.git 和 HTTPS 地址 https://host/owner/repo.git。
     scp_match = re.match(
         rf"^(?:[^@]+@)?{re.escape(expected_host)}:(?P<owner>[^/]+)/(?P<repo>[^/]+?)/?$",
         remote_url,
@@ -294,6 +296,9 @@ def strip_ansi(text: str) -> str:
 
 def detect_gitee_ssh_owner() -> str | None:
     """通过 SSH 登录提示识别当前 Gitee 账号，例如 liangliang2000。"""
+    # Gitee 的 SSH 认证成功时会输出类似：
+    # Hi liangliang2000(@liangliang2000)! You've successfully authenticated...
+    # 这里解析这个登录名，避免默认拿 GitHub 用户名当 Gitee 命名空间。
     result = subprocess.run(
         [
             "ssh",
@@ -706,12 +711,17 @@ def gitee_error_message(response: ApiResponse) -> str:
     return response.text.strip() or f"HTTP {response.status}"
 
 
-def gitee_repo_exists(target: GiteeTarget, token: str | None) -> bool:
-    response = gitee_api_request(
+def get_gitee_repo(target: GiteeTarget, token: str | None) -> ApiResponse:
+    # 查询 Gitee 仓库是否存在；公开仓库通常不用 token 也能查到。
+    return gitee_api_request(
         "GET",
         f"/repos/{api_quote(target.owner)}/{api_quote(target.name)}",
         token=token,
     )
+
+
+def gitee_repo_exists(target: GiteeTarget, token: str | None) -> bool:
+    response = get_gitee_repo(target, token)
     if response.status == 200:
         return True
     if response.status == 404:
@@ -722,7 +732,28 @@ def gitee_repo_exists(target: GiteeTarget, token: str | None) -> bool:
     )
 
 
+def ensure_gitee_repo_visibility(
+    target: GiteeTarget,
+    response: ApiResponse,
+    *,
+    private: bool,
+) -> None:
+    # 默认要求 Gitee 仓库公开。只有用户显式加 --private 时，才允许私有仓库。
+    if private or not isinstance(response.data, dict):
+        return
+
+    private_value = response.data.get("private")
+    is_private = private_value is True or str(private_value).lower() == "true"
+    if is_private:
+        raise SyncError(
+            f"Gitee repository already exists but is private: {target.web_url}. "
+            "Make it public on Gitee, or re-run with --private if you really want "
+            "a private mirror."
+        )
+
+
 def create_gitee_repo(target: GiteeTarget, *, token: str, private: bool) -> None:
+    # Gitee API 的 private=false 表示创建公开仓库；脚本默认 private=False。
     response = gitee_api_request(
         "POST",
         "/user/repos",
@@ -756,9 +787,16 @@ def ensure_gitee_repo(
         return
 
     step(f"Check Gitee repository: {target.web_url}")
-    if gitee_repo_exists(target, token):
+    response = get_gitee_repo(target, token)
+    if response.status == 200:
+        ensure_gitee_repo_visibility(target, response, private=private)
         log(f"Gitee repository exists: {target.web_url}")
         return
+    if response.status != 404:
+        raise SyncError(
+            f"Could not check Gitee repository {target.web_url}: "
+            f"HTTP {response.status}: {gitee_error_message(response)}"
+        )
 
     if not token:
         raise SyncError(
@@ -768,11 +806,13 @@ def ensure_gitee_repo(
 
     step(f"Create {visibility} Gitee repository: {target.web_url}")
     create_gitee_repo(target, token=token, private=private)
-    if not gitee_repo_exists(target, token):
+    response = get_gitee_repo(target, token)
+    if response.status != 200:
         raise SyncError(
             "Gitee repository was created, but the expected target path was not found. "
             "Check whether --gitee-owner matches your Gitee account namespace."
         )
+    ensure_gitee_repo_visibility(target, response, private=private)
     log(f"Gitee repository created: {target.web_url}")
 
 
@@ -825,6 +865,7 @@ def sync_repositories(
     ensure_has_commit(repo)
     ensure_clean_worktree(repo)
 
+    # 1. 先确认 GitHub remote 可用。没有 GitHub remote 时，脚本会按参数创建或添加。
     step("Ensure GitHub remote")
     github_slug = ensure_github_remote(
         repo=repo,
@@ -835,6 +876,7 @@ def sync_repositories(
         fix_remote=fix_remote,
         dry_run=dry_run,
     )
+    # 2. Gitee owner 默认取 SSH 登录账号，例如 liangliang2000；仓库名沿用 GitHub 仓库名。
     target = build_gitee_target(
         choose_gitee_owner(gitee_owner, github_slug.owner),
         github_slug.name,
@@ -842,6 +884,7 @@ def sync_repositories(
     log(f"GitHub repository: {github_slug.owner}/{github_slug.name}")
     log(f"Gitee target: {target.owner}/{target.name}")
 
+    # 3. 确保 Gitee 仓库存在。默认创建公开仓库；只有传 --private 才创建/允许私有仓库。
     token = os.environ.get(GITEE_TOKEN_ENV)
     ensure_gitee_repo(target=target, token=token, private=private, dry_run=dry_run)
     ensure_gitee_remote(
@@ -867,6 +910,7 @@ def sync_repositories(
     missing_refs: list[str] = []
     fetched_remotes: list[str] = []
     for remote in (github_remote, gitee_remote):
+        # 4. 拉取两端远程分支。新仓库还没有 main 分支时，只记录 warning。
         step(f"Fetch {remote}/{branch}")
         result = run_git(repo, ["fetch", remote, branch], check=False)
         if result.returncode == 0:
@@ -882,6 +926,7 @@ def sync_repositories(
 
     try:
         for remote in fetched_remotes:
+            # 5. 把远程新提交合并进本地。冲突需要用户手动解决后再重跑脚本。
             step(f"Merge {remote}/{branch}")
             run_git(repo, ["merge", "--no-edit", remote_ref(remote, branch)])
     except SyncError:
@@ -896,6 +941,7 @@ def sync_repositories(
 
     push_failures: list[str] = []
     for remote in (github_remote, gitee_remote):
+        # 6. 最后把当前本地 HEAD 同步推送到 GitHub 和 Gitee。
         step(f"Push HEAD to {remote}/{branch}")
         result = run_git(repo, ["push", remote, f"HEAD:{branch}"], check=False)
         if result.returncode != 0:
@@ -981,6 +1027,7 @@ def print_init_gitee(
             "    [Environment]::SetEnvironmentVariable("
             f"'{GITEE_TOKEN_ENV}','your-gitee-token','User')"
         )
+    print("  Default visibility: public. Use --private only if you want a private Gitee mirror.")
 
     try:
         repo = ensure_repo(repo)
@@ -1062,7 +1109,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--private",
         action="store_true",
-        help="Create the Gitee repository as private. Default is public.",
+        help="Create or accept a private Gitee repository. If omitted, Gitee is public.",
     )
     parser.add_argument(
         "--fix-remote",
