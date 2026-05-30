@@ -14,6 +14,31 @@ import os
 import re
 import subprocess
 import sys
+
+
+def prepend_conda_dll_paths() -> None:
+    """直接运行 conda 环境 python.exe 时，补上激活环境本应设置的 DLL 路径。"""
+    prefix = getattr(sys, "prefix", "")
+    if not prefix or not (os.path.isdir(os.path.join(prefix, "conda-meta"))):
+        return
+
+    paths = [
+        os.path.join(prefix, "Library", "bin"),
+        os.path.join(prefix, "DLLs"),
+        os.path.join(prefix, "Scripts"),
+    ]
+    current_path = os.environ.get("PATH", "")
+    current_parts = [part.lower() for part in current_path.split(os.pathsep)]
+    missing_paths = [
+        path for path in paths if os.path.isdir(path) and path.lower() not in current_parts
+    ]
+    if missing_paths:
+        os.environ["PATH"] = os.pathsep.join([*missing_paths, current_path])
+
+
+# 必须在 urllib.request 导入前补 DLL 路径，否则 Python 可能没有 HTTPS 支持。
+prepend_conda_dll_paths()
+
 import urllib.error
 import urllib.parse
 import urllib.request
