@@ -1,7 +1,11 @@
 .idea/
-.vscode/
+.vscode/*
+!.vscode/
+!.vscode/tasks.json
 __pycache__/
 *.py[cod]
+
+AGENTS.md
 
 # Full local datasets are intentionally kept out of git.
 myPic/

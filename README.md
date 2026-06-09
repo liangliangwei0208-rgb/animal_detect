@@ -59,3 +59,33 @@ F:\anaconda\Scripts\conda.exe run -n tf22 python predict.py
 ## 训练脚本
 
 `mobilev2.py` 是训练脚本，会读取 `pic_object/` 数据集并保存 `animal.h5`。训练依赖完整本地数据集，仓库中不包含完整数据集。
+
+训练脚本里的 MobileNetV2 保留了 `weights='imagenet'`，首次训练会自动下载 ImageNet 预训练权重。预训练权重对小数据集更友好，因此不要改成 `weights=None`，除非明确想从零开始训练。
+
+请用 `conda run` 或已经激活的 `tf22` 环境启动训练，不要直接调用 `C:\Users\weili\.conda\envs\tf22\python.exe`。直接调用环境内的 `python.exe` 可能没有加载 conda 的 DLL/SSL 路径，导致下载权重时报错：
+
+```text
+unknown url type: https
+```
+
+训练前可以先验证 SSL 是否正常：
+
+```powershell
+F:\anaconda\Scripts\conda.exe run -n tf22 python -c "import ssl; print(ssl.OPENSSL_VERSION)"
+```
+
+正常时会输出类似 `OpenSSL 1.1.1w`。然后启动训练：
+
+```powershell
+F:\anaconda\Scripts\conda.exe run -n tf22 python mobilev2.py
+```
+
+第一次训练时，Keras 会把 MobileNetV2 权重下载到：
+
+```text
+C:\Users\weili\.keras\models\
+```
+
+### VS Code 点击训练
+
+仓库已提供 `.vscode/tasks.json`。在 VS Code 中可以打开命令面板执行 `Terminal: Run Build Task`，或使用默认构建快捷键，选择/运行 `训练 MobileNetV2`。这个任务会通过 `F:\anaconda\Scripts\conda.exe run -n tf22 python mobilev2.py` 启动，避免 SSL DLL 没加载的问题。
