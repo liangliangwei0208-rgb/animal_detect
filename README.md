@@ -89,3 +89,13 @@ C:\Users\weili\.keras\models\
 ### VS Code 点击训练
 
 仓库已提供 `.vscode/tasks.json`。在 VS Code 中可以打开命令面板执行 `Terminal: Run Build Task`，或使用默认构建快捷键，选择/运行 `训练 MobileNetV2`。这个任务会通过 `F:\anaconda\Scripts\conda.exe run -n tf22 python mobilev2.py` 启动，避免 SSL DLL 没加载的问题。
+
+### 训练显存说明
+
+本机 GTX 1650 显存约 4GB。训练集约 9638 张 224x224 图片，如果使用 `validation_split=0.15`，TensorFlow 2.2 可能会在 GPU 上对整份大数组做切分，报错类似：
+
+```text
+Failed copying input tensor from CPU:0 to GPU:0 ... GatherV2: Dst tensor is not initialized
+```
+
+训练脚本现在会先用 Numpy 在 CPU 上手动切分训练集和验证集，并把 `BATCH_SIZE` 设为 8，减少显存占用。旧 checkpoint 会在 `compile()` 前只恢复模型权重，避免混合精度优化器状态不兼容。

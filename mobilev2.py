@@ -27,6 +27,8 @@ np.set_printoptions(threshold=np.inf)
 # 自制数据集：
 # 数据文件夹
 data_dir = "./pic_object"
+VALIDATION_SPLIT = 0.15
+BATCH_SIZE = 32  # GTX 1650 只有约4GB显存，批量太大容易显存不足
 # 从文件夹读取图片和标签到numpy数组中
 # 标签信息在文件名中，例如1_40.jpg表示该图片的标签为1
 def read_data(data_dir):
@@ -46,7 +48,9 @@ def read_data(data_dir):
     labels = np.array(labels, dtype='int')
 
     print("shape of datas: {}\tshape of labels: {}".format(datas.shape, labels.shape))
-    print(labels)
+    # 只打印每类数量，避免一次输出几千个标签导致终端刷屏
+    label_ids, label_counts = np.unique(labels, return_counts=True)
+    print("label counts:", dict(zip(label_ids.tolist(), label_counts.tolist())))
     return fpaths, datas, labels
 
 fpaths, datas, labels = read_data(data_dir)
@@ -57,8 +61,13 @@ np.random.seed(200)
 np.random.shuffle(labels)
 
 # 读取自制训练集：
-x_train = datas
-y_train = labels   # 0：bird； 1：butterfly； 2：cat； 3：dog； 4：tigger
+# 先在CPU/Numpy里手动切分训练集和验证集，避免Keras validation_split在GPU上搬运整份大数组
+split_index = int(len(datas) * (1 - VALIDATION_SPLIT))
+x_train = datas[:split_index]
+y_train = labels[:split_index]   # 0：bird； 1：butterfly； 2：cat； 3：dog； 4：tigger
+x_val = datas[split_index:]
+y_val = labels[split_index:]
+print("train samples: {}\tvalidation samples: {}".format(len(x_train), len(x_val)))
 
 # 数据增强：
 image_gen_train = ImageDataGenerator(
@@ -84,6 +93,14 @@ model.add(mobilenet)
 model.add(tf.keras.layers.Dense(256))
 model.add(tf.keras.layers.Dense(5, activation='softmax'))
 
+checkpoint_save_path = "./checkpoint1/trash_model.ckpt"
+if os.path.exists(checkpoint_save_path + '.index'):
+    print('-------------load the model weights-----------------')
+    # 先加载模型权重，再compile优化器，避免旧checkpoint里的优化器状态和混合精度LossScaleOptimizer冲突
+    load_status = model.load_weights(checkpoint_save_path)
+    if hasattr(load_status, 'expect_partial'):
+        load_status.expect_partial()
+
 # 使用混合精度训练优化器
 opt = tf.keras.optimizers.Adam(learning_rate=1e-5)
 opt = mixed_precision.LossScaleOptimizer(opt, loss_scale='dynamic')
@@ -91,11 +108,6 @@ opt = mixed_precision.LossScaleOptimizer(opt, loss_scale='dynamic')
 model.compile(optimizer=opt,
               loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False),
               metrics=['sparse_categorical_accuracy'])
-
-checkpoint_save_path = "./checkpoint1/trash_model.ckpt"
-if os.path.exists(checkpoint_save_path + '.index'):
-    print('-------------load the model-----------------')
-    model.load_weights(checkpoint_save_path)
 
 # 保存模型：
 cp_callback_list = [
@@ -122,7 +134,7 @@ cp_callback_list = [
 
 # fit中执行训练过程：告知训练集和测试集的输入特征和标签；告知每个batch是多少，告知要迭代多少次数据集
 # 告知测试集，告知数据集迭代次数，用测试集验证准确率；告知1次数据迭代，打印出验证的数据；使用回调函数，实现断点续训
-history = model.fit(x_train, y_train, batch_size=64, epochs=200, validation_split=0.15, validation_freq=1,
+history = model.fit(x_train, y_train, batch_size=BATCH_SIZE, epochs=200, validation_data=(x_val, y_val), validation_freq=1,
                     callbacks=cp_callback_list)
 
 # 保存h5模型
